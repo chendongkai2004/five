@@ -1,0 +1,6 @@
+{
+  "name": "BigData Real-time Warehouse",
+  "dockerFile": "Dockerfile",
+  "postCreateCommand": "bash .devcontainer/install.sh",
+  "forwardPorts": [4040, 16010, 9200, 6379, 9092, 2181]
+}
