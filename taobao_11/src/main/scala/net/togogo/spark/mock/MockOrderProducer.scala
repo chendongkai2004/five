@@ -1,9 +1,23 @@
+package net.togogo.spark.mock
+
 import java.util.Properties
 import org.apache.commons.lang3.time.FastDateFormat
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerRecord}
 import org.apache.kafka.common.serialization.StringSerializer
 import org.json4s.jackson.Json
 import scala.util.Random
+
+/**
+ * 订单实体类 (补充缺失的定义)
+ */
+case class OrderRecord(
+  orderId: String,
+  userId: String,
+  orderTime: String,
+  orderIp: String,
+  orderMoney: Double,
+  orderStatus: Int
+)
 
 /**
  * 模拟生产订单数据，发送到Kafka Topic中
@@ -17,17 +31,21 @@ object MockOrderProducer {
     try {
       // 1. Kafka Client Producer 配置信息
       val props = new Properties()
-      props.put("bootstrap.servers", "master:9092")
+     // props.put("bootstrap.servers", "master:9092") // 请确保 master:9092 是你实际的 Kafka 地址
+      props.put("bootstrap.servers", "localhost:9092")
       props.put("acks", "1")
       props.put("retries", "3")
       props.put("key.serializer", classOf[StringSerializer].getName)
       props.put("value.serializer", classOf[StringSerializer].getName)
+      
       // 2. 创建KafkaProducer对象，传入配置信息
       producer = new KafkaProducer[String, String](props)
+      
       // 随机数实例对象
       val random: Random = new Random()
       // 订单状态：订单打开 0，订单取消 1，订单关闭 2，订单完成 3
       val allStatus = Array(0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+      
       while (true) {
         // 每次循环 模拟产生的订单数目
         val batchNumber: Int = random.nextInt(2) + 1
@@ -38,15 +56,18 @@ object MockOrderProducer {
           val orderTime: String = getDate(currentTime, format = "yyyy-MM-dd HH:mm:ss.SSS")
           val orderMoney: String = s"${5 + random.nextInt(500)}.%02d".format(random.nextInt(100))
           val orderStatus: Int = allStatus(random.nextInt(allStatus.length))
+          
           // 3. 订单记录数据
           val orderRecord: OrderRecord = OrderRecord(
             orderId, userId, orderTime, getRandomIp, orderMoney.toDouble, orderStatus)
+            
           // 转换为JSON格式数据
           val orderJson = new Json(org.json4s.DefaultFormats).write(orderRecord)
           println(orderJson)
+          
           // 4. 构建ProducerRecord对象
           val record = new ProducerRecord[String, String]("orderTopic", orderJson)
-          // 5. 发送数据：def send(messages: KeyedMessage[K,V]*), 将数据发送到Topic
+          // 5. 发送数据：将数据发送到Topic
           producer.send(record)
         }
         Thread.sleep(random.nextInt(10) * 100 + 500)
@@ -87,7 +108,7 @@ object MockOrderProducer {
     // 转换Int类型IP地址为IPv4格式
     number2IpString(ipNumber)
   }
-
+  
   /** =================将Int类型IPv4地址转换为字符串类型================= */
   def number2IpString(ip: Int): String = {
     val buffer: Array[Int] = new Array[Int](4)

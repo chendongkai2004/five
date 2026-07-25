@@ -1,3 +1,5 @@
+package net.togogo.spark.elt
+
 import net.togogo.spark.config.ApplicationConfig
 import net.togogo.spark.utils.SparkUtils
 import org.apache.spark.SparkFiles
@@ -9,13 +11,15 @@ import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.sql.{DataFrame, Dataset, SparkSession}
 import org.lionsoul.ip2region.{DataBlock, DbConfig, DbSearcher}
 
-object RealTimeOrderETL extends Logging{
+object RealTimeOrderETL extends Logging {
+
   /**
    * 对流式数据StreamDataFrame进行ETL过滤清洗转换操作
    */
   def streamingProcess(streamDF: DataFrame): DataFrame = {
     val session = streamDF.sparkSession
     import session.implicits._
+
     // TODO: 对数据进行ETL操作，获取订单状态为0(打开)及转换IP地址为省份和城市
     // 1. 获取订单记录Order Record数据
     val recordStreamDS: Dataset[String] = streamDF
@@ -25,33 +29,56 @@ object RealTimeOrderETL extends Logging{
       .as[String]
       // 过滤数据：通话状态为success
       .filter(record => null != record && record.trim.split(",").length > 0)
+
     // 自定义UDF函数，解析IP地址为省份和城市
     session.sparkContext.addFile(ApplicationConfig.IPS_DATA_REGION_PATH)
-    val ip_to_location: UserDefinedFunction = udf(
-      (ip: String) => {
-        val dbSearcher = new DbSearcher(new DbConfig(), SparkFiles.get("ip2region.db"))
-        // 依据IP地址解析
-        val dataBlock: DataBlock = dbSearcher.btreeSearch(ip)
-        // 中国|0|海南省|海口市|教育网
-        val region: String = dataBlock.getRegion
-        println("======>"+region)
-        // 分割字符串，获取省份和城市
-        val Array(_, _, province,city, _) = region.split("\\|")
-        // 返回Region对象
-        (province, city)
+
+    // 【优化】使用 lazy val 在 Executor 端延迟初始化 DbSearcher，避免每条记录都创建新实例
+    // 注意：SparkFiles.get 必须在 Executor 端执行，不能在 Driver 端调用
+    @transient lazy val dbSearcher: DbSearcher = new DbSearcher(new DbConfig(), SparkFiles.get("ip2region.db"))
+
+    val ip_to_location: UserDefinedFunction = udf((ip: String) => {
+      // ========== 方案一核心修改：在 UDF 内部处理 null 和异常情况 ==========
+      if (ip == null || ip.trim.isEmpty) {
+        // IP 为空时返回默认值
+        ("Unknown", "Unknown")
+      } else {
+        try {
+          // 依据IP地址解析
+          val dataBlock: DataBlock = dbSearcher.btreeSearch(ip.trim)
+          if (dataBlock == null) {
+            ("Unknown", "Unknown")
+          } else {
+            // 中国|0|海南省|海口市|教育网
+            val region: String = dataBlock.getRegion
+            println("======>" + region)
+            // 分割字符串，获取省份和城市
+            val parts = region.split("\\|")
+            if (parts.length >= 4) {
+              (parts(2), parts(3))
+            } else {
+              ("Unknown", "Unknown")
+            }
+          }
+        } catch {
+          case e: Exception =>
+            logWarning(s"Failed to parse IP: $ip, error: ${e.getMessage}")
+            ("Unknown", "Unknown")
+        }
       }
-    )
+      // ====================================================================
+    })
+
     // 2. 其他订单字段，按照订单状态过滤和转换IP地址
     val resultStreamDF: DataFrame = recordStreamDS
       // 提取订单字段
-      // {"orderId":"20200518213916455000009","userId":"300000991","orderTime":"2020-05-18 21:3 9: 16.455 "," ip":" 222.16 .48 .97 "," orderMoney":415.3," orderStatus":0}
       .select(
-        get_json_object($"value", "$.orderId").as("orderId"), //
-        get_json_object($"value", "$.userId").as("userId"), //
-        get_json_object($"value", "$.orderTime").as("orderTime"), //
-        get_json_object($"value", "$.ip").as("ip"), //
-        get_json_object($"value", "$.orderMoney").as("orderMoney"), //
-        get_json_object($"value", "$.orderStatus").cast(IntegerType).as("orderStatus") //
+        get_json_object($"value", "$.orderId").as("orderId"),
+        get_json_object($"value", "$.userId").as("userId"),
+        get_json_object($"value", "$.orderTime").as("orderTime"),
+        get_json_object($"value", "$.ip").as("ip"),
+        get_json_object($"value", "$.orderMoney").as("orderMoney"),
+        get_json_object($"value", "$.orderStatus").cast(IntegerType).as("orderStatus")
       )
       // 订单状态为0(打开)
       .filter($"orderStatus" === 0)
@@ -69,6 +96,7 @@ object RealTimeOrderETL extends Logging{
           )
         ).as("value")
       )
+
     // 3. 返回
     resultStreamDF
   }
@@ -77,6 +105,7 @@ object RealTimeOrderETL extends Logging{
     // 1. 获取SparkSession实例对象
     val spark: SparkSession = SparkUtils.createSparkSession(this.getClass)
     import spark.implicits._
+
     // 2. 从KAFKA读取消费数据
     val kafkaStreamDF: DataFrame = spark
       .readStream
@@ -86,8 +115,10 @@ object RealTimeOrderETL extends Logging{
       // 设置每批次消费数据最大值
       .option("maxOffsetsPerTrigger", ApplicationConfig.KAFKA_MAX_OFFSETS)
       .load()
+
     // 3. 数据ETL操作
     val etlStreamDF: DataFrame = streamingProcess(kafkaStreamDF)
+
     // 4. 针对流式应用来说，输出的是流
     val query: StreamingQuery = etlStreamDF.writeStream
       // 对流式应用输出来说，设置输出模式
@@ -99,9 +130,9 @@ object RealTimeOrderETL extends Logging{
       .option("checkpointLocation", ApplicationConfig.STREAMING_ETL_CKPT)
       // 流式应用，需要启动start
       .start()
+
     // 5. 流式查询等待流式应用终止
     query.awaitTermination()
     query.stop()
   }
-
 }
